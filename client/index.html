@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyChat!</title>
+
+    <script type="module">
+        import { io } from "https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.8.1/socket.io.esm.min.js";
+    
+        document.addEventListener("DOMContentLoaded", () => {
+          let socket;
+          let username;
+          let serverOffset = 0;
+          let currentRoom = null;
+    
+          const loginForm = document.getElementById("auth-form");
+          const authContainer = document.getElementById("auth-container");
+          const chatContainer = document.getElementById("chat-container");
+          const errorEl = document.getElementById("auth-error");
+    
+          const usernameInput = document.getElementById("username");
+          const passwordInput = document.getElementById("password");
+    
+          const form = document.getElementById("form");
+          const input = document.getElementById("input");
+          const messages = document.getElementById("messages");
+    
+          const roomList = document.getElementById("joined-rooms");
+          const leaveRoomButton = document.getElementById("leave-room-b");
+    
+          loginForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+    
+            username = usernameInput.value.trim();
+            const password = passwordInput.value.trim();
+    
+            if (!username || !password) {
+              errorEl.textContent = "Username and password are required";
+              return;
+            }
+    
+            try {
+              const resLogin = await fetch("/api/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username, password }),
+              });
+    
+              let data = await resLogin.json();
+    
+              if (resLogin.status === 401) {
+                const resRegister = await fetch("/api/register", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ username, password }),
+                });
+    
+                data = await resRegister.json();
+    
+                if (!resRegister.ok) {
+                  errorEl.textContent = data.error || "Registration failed";
+                  return;
+                }
+              } else if (!resLogin.ok) {
+                errorEl.textContent = data.error || "Login failed";
+                return;
+              }
+    
+              serverOffset = data.serverOffset || 0;
+              authContainer.style.display = "none";
+              chatContainer.style.display = "block";
+    
+              startSocket();
+            } catch (err) {
+              console.error("Network error:", err);
+            }
+          });
+    
+          function stringToColor(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+              hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            let color = "#";
+            for (let i = 0; i < 3; i++) {
+              const value = (hash >> (i * 8)) & 0xff;
+              color += ("00" + value.toString(16)).slice(-2);
+            }
+            return color;
+          }
+    
+          function startSocket() {
+            socket = io({
+              auth: { username, serverOffset },
+            });
+    
+            socket.on("room list", (rooms) => {
+              const roomsList = document.getElementById("rooms");
+              roomsList.innerHTML = "";
+    
+              rooms.forEach((room) => {
+                const li = document.createElement("li");
+                li.textContent = room;
+                li.addEventListener("click", () => {
+                  if (currentRoom !== room) {
+                    if (currentRoom) {
+                      socket.emit("leave room", currentRoom);
+                      removeRoomFromList(currentRoom);
+                    }
+                    currentRoom = room;
+                    addRoomToList(currentRoom);
+                    messages.innerHTML = "";
+                    leaveRoomButton.style.display = "block";
+                    highlightSelectedRoom();
+                  }
+                });
+                roomsList.appendChild(li);
+              });
+            });
+    
+            const roomForm = document.getElementById("room-form");
+            const roomInput = document.getElementById("room-input");
+    
+            roomForm.addEventListener("submit", (e) => {
+              e.preventDefault();
+              const roomName = roomInput.value.trim();
+              if (roomName && roomName !== currentRoom && !joinedRooms.has(roomName)) {
+                if (currentRoom) {
+                  socket.emit("leave room", currentRoom);
+                  removeRoomFromList(currentRoom);
+                  joinedRooms.delete(currentRoom);
+                }
+                currentRoom = roomName;
+                socket.emit("join room", roomName);
+                addRoomToList(currentRoom);
+                messages.innerHTML = "";
+                leaveRoomButton.style.display = "block";
+                highlightSelectedRoom();
+              }
+            });
+
+            socket.on("joined rooms", (joinedRooms) => {
+              const joinedList = document.getElementById("joined-rooms");
+              joinedList.innerHTML = ""; 
+
+              joinedRooms.forEach(room => {
+                addRoomToList(room, joinedList);
+              });
+            });
+    
+            leaveRoomButton.addEventListener("click", () => {
+              if (currentRoom) {
+                socket.emit("leave room", currentRoom);
+                removeRoomFromList(currentRoom);
+                currentRoom = null;
+                messages.innerHTML = "";
+                leaveRoomButton.style.display = "none";
+                highlightSelectedRoom();
+              }
+            });
+    
+            socket.on("chat history", (history) => {
+              history.forEach((msg) => {
+                addMessage(msg);
+                serverOffset = Math.max(serverOffset, msg.id);
+              });
+              socket.auth.serverOffset = serverOffset;
+              messages.scrollTop = messages.scrollHeight;
+            });
+    
+            socket.on("chat message", (msg) => {
+              addMessage(msg);
+              serverOffset = Math.max(serverOffset, msg.id);
+              socket.auth.serverOffset = serverOffset;
+              messages.scrollTop = messages.scrollHeight;
+            });
+    
+            form.addEventListener("submit", (e) => {
+              e.preventDefault();
+              if (input.value.trim() && currentRoom) {
+                socket.emit("chat message", {
+                  username,
+                  content: input.value.trim(),
+                  room: currentRoom,
+                });
+                input.value = "";
+                input.focus();
+              }
+            });
+    
+            function highlightSelectedRoom() {
+              const roomsItems = document.querySelectorAll("#rooms li");
+              roomsItems.forEach((item) => {
+                item.style.fontWeight = item.textContent === currentRoom ? "bold" : "normal";
+                item.style.backgroundColor = item.textContent === currentRoom ? "#e0e0e0" : "";
+              });
+            }
+
+            function addRoomToList(roomName, list = roomList) {
+                if (!document.getElementById(`room-${roomName}`)) {
+                    const li = document.createElement("li");
+                    li.id = `room-${roomName}`;
+                    li.textContent = roomName;
+                    list.appendChild(li);
+                }
+            }
+
+            function removeRoomFromList(roomName) {
+                const li = document.getElementById(`room-${roomName}`);
+                if (li) {
+                    roomList.removeChild(li);
+                }
+            }
+          }
+    
+          function addMessage(msg) {
+            const color = stringToColor(msg.username);
+            const isSelf = msg.username === username;
+            const item = `
+              <li class="${isSelf ? "self" : "other"}">
+                ${!isSelf ? `<strong style="color:${color}">${msg.username}:</strong>` : ""}
+                <small>${msg.content}</small>
+              </li>`;
+            messages.insertAdjacentHTML("beforeend", item);
+          }
+        });
+      </script>
+    
+    <style>
+        
+        *, 
+        *::before,
+        *::after {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            display: grid;
+            place-content: center;
+            height: 100vh;
+            padding: 36px 36px 100px 36px;
+            grid-template-rows: 1fr;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+
+        #container {
+            display: flex;
+            height: 100vh;
+            padding: 36px;
+            gap: 5px;
+            box-sizing: border-box;
+        }
+
+        #messages {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            overflow-y: scroll;
+            height: 100%;
+            scroll-behavior: smooth;
+            padding-bottom: 48px;
+            display: flex;
+            flex-direction: column;
+
+        }
+
+        #messages > li {
+            max-width: 70%; /* Prevents messages from stretching too wide */
+            word-wrap: break-word; /* Ensures long words wrap */
+            overflow-wrap: break-word; /* Better browser support */
+            display: inline-block; /* Keeps bubbles tight to their content */
+            padding: .5rem 1rem;
+            margin: 6px 12px;
+            border-radius: 4px;
+            clear: both;
+        }
+
+        #messages > li.self {
+            background-color: #dcf8c6;
+            text-align: right;
+            border-radius: 4px;
+            margin: 50;
+            padding: 10px;
+            /* border: 1px solid #0000003f;  */
+            align-self: flex-end;
+
+        }
+        #messages > li.other {
+            background-color: #ffffff;
+            text-align: left;
+            border-radius: 4px;
+            margin: 5px 10px;
+            padding: 10px;
+            /* border: 1px solid #0000003f; */
+            align-self: flex-start;
+        }
+
+        #chat {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            overflow: hidden;
+            width: 350px;
+            height: 100%;
+            position: relative;
+        }
+
+        #form {
+            bottom: 0;
+            display: flex;
+            height: 48px;
+            left: 0;
+            padding: 4px;
+            position: absolute;
+            right: 0;
+        }
+
+        #input {
+            border-radius: 9999px;
+            border: 1px solid #eee;
+            flex: 1;
+            margin: 4px;
+            padding: 0 8px;
+        }
+
+        #input:focus {
+            outline: 0;
+        }
+
+        #form > button {
+            background: #09f;
+            color: #fff;
+            border: 0;
+            margin: 4px;
+            border-radius: 4px;
+        }
+
+        #form > button:hover {
+            background: #0cf;
+        }
+
+        #room-form {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+            /* height: 48px;
+            left: 0;
+            padding: 4px;
+            position: absolute;
+            right: 0; */
+        }
+
+        #room-form > button {
+            /* padding: 10px; */
+            border-radius: 9999px;
+            border: none;
+            background-color: #4CAF50;
+            color: white;
+            /* font-size: 16px; */
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        #room-form > button:hover {
+            background-color: #45a049;
+        }
+
+        #room-form > input {
+            /* border-radius: 9999px;
+            border: 1px solid #eee;
+            flex: 1;
+            margin: 4px;
+            padding: 0 8px; */
+            padding: 10px 15px;
+            border-radius: 9999px;
+            border: 1px solid #ccc;
+            background-color: #eef3ff;
+            color: #000;
+            font-size: 16px;
+            outline: none;
+            flex: 1;
+        }
+
+        #room-form > input::placeholder {
+            color: #888;
+        }
+
+        #auth-form {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 300px;
+
+        }
+
+        #auth-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            width: 500px;
+            padding: 20px;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(63, 72, 117, 0.655);
+            font-family: Garamond, serif;;
+        }
+
+        #auth-form > button {
+            background: rgb(132, 171, 197);
+            color: #fff;
+            border: 0;
+            margin: 4px;
+            border-radius: 9999px;
+        }
+
+        #auth-form > button:hover {
+            background: rgb(132, 171, 197);
+        }
+
+        #auth-form > input {
+            border-radius: 9999px;
+            border: 1px solid #eee;
+            flex: 1;
+            margin: 4px;
+            padding: 0 8px;
+        }
+        #auth-form > input:focus {
+            outline: 0;
+        }
+
+        /* Chat Rooms side bar */
+        #chat-rooms {
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            overflow: hidden;
+            width: 300px;
+            height: 100%;
+            position: relative;
+            padding: 10px;
+            background-color: #ffffff;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Chat Rooms list */
+        #rooms {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            overflow-y: auto;
+            flex-grow: 1;
+
+        }
+
+        #rooms li {
+            padding: 6px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        #rooms li:hover {
+            background-color: #f0f0f0;
+        }
+
+        #leave-room-b {
+            background: #f44336;
+            color: #fff;
+            border: 0;
+            margin: 4px;
+            border-radius: 9999px;
+        }
+
+    </style>
+</head>
+<body>
+    <div id="auth-container">
+        <h1>Welcome to ChatApp!</h1>
+        <h2>Login / Register</h2>
+        <form id="auth-form">
+            <input type="text" name="auth-username" id="username" placeholder="Username" required/>
+            <input type="password" name="auth-password" id="password" placeholder="Password" required/>
+            <button type="submit">Login / Register</button>
+        </form>
+        <p id="auth-error" style="color: red;"></p>
+    </div>
+    <div id="chat-container" style="display: none;">
+        <div id="container">
+            <section id="chat-rooms">
+                <ul id="rooms"></ul>
+                <form id="room-form">
+                    <input type="text" id="room-input" placeholder="Enter room name" required/>
+                    <button type="submit" >Join Room</button>
+                    <ul id="joined-rooms" style="list-style: none; padding-left: 0;"></ul>
+                </form>
+                <button id="leave-room-b" style="margin-top: 10px; display: none;">Leave Room</button>
+            </section>
+            <section id="chat">
+                <ul id="messages"></ul>
+                <form id="form">
+                    <input type="text" name="message" id="input" placeholder="Write something here" autocomplete="off" />
+                    <button type="submit">Send</button>
+                </form>
+            </section>
+        </div>
+    </div>
+</body>
+</html>
