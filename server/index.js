@@ -4,6 +4,9 @@ import { Server } from 'socket.io'
 import { createServer } from 'node:http'
 import mysql from 'mysql2/promise'
 import bcrypt from 'bcrypt'
+import mongoose from 'mongoose'
+import { Message } from './models/message.js'
+// import { timeStamp } from 'node:console'
 
 const Port = process.env.PORT ?? 3000
 const app = express()
@@ -70,12 +73,25 @@ let db
 
 async function startServer() {
     try {
-        db = await mysql.createConnection({
-            host: 'localhost',
-            user: 'root',
-            password: 'maiafigue4',
-            database: 'chat_app'
-        })
+        try {
+            await mongoose.connect('mongodb://localhost:27017/chat_app_mongo');
+                console.log('✅ Connected to MongoDB');
+            } catch (err) {
+                console.error('❌ MongoDB connection failed:', err);
+            }
+
+            try {
+            db = await mysql.createConnection({
+                host: 'localhost',
+                user: 'root',
+                password: 'maiafigue4',
+                database: 'chat_app',
+                connectTimeout: 20000
+            });
+            console.log('✅ Connected to MySQL');
+            } catch (err) {
+                console.error('❌ MySQL connection failed:', err);
+            }
 
         const rooms = new Set()
 
@@ -94,11 +110,12 @@ async function startServer() {
 
             
                 try {
-                    const [rows] = await db.execute(
-                        'SELECT username, content, timestamp FROM messages WHERE room = ? ORDER BY timestamp DESC LIMIT 50',
-                        [room]
-                    );
-                    socket.emit('chat history', rows.reverse());
+                    // const [rows] = await db.execute(
+                    //     'SELECT username, content, timestamp FROM messages WHERE room = ? ORDER BY timestamp DESC LIMIT 50',
+                    //     [room]
+                    // );
+                    const recentMessages = await Message.find({ room }).sort({ timestamp: -1 }).limit(50);
+                    socket.emit('chat history', recentMessages.reverse());
                 } catch (err) {
                     console.error('Error fetching messages:', err);
                 }
@@ -121,12 +138,14 @@ async function startServer() {
                 }
             
                 try {
-                    const [result] = await db.execute(
-                        'INSERT INTO messages (username, content, room) VALUES (?, ?, ?)',
-                        [username, content, room]
-                    );
-                    const insertedId = result.insertId;
-                    io.to(room).emit('chat message', { username, content, room, id: insertedId });
+                    const mongoMsg = new Message({username, content, room})
+                    await mongoMsg.save()
+                    // const [result] = await db.execute(
+                    //     'INSERT INTO messages (username, content, room) VALUES (?, ?, ?)',
+                    //     [username, content, room]
+                    // );
+                    // const insertedId = result.insertId;
+                    io.to(room).emit('chat message', { username, content, room, timeStamp: mongoMsg.timestamp });
                 } catch (err) {
                     console.error('Error inserting message:', err);
                 }
