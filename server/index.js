@@ -6,7 +6,6 @@ import mysql from 'mysql2/promise'
 import bcrypt from 'bcrypt'
 import mongoose from 'mongoose'
 import { Message } from './models/message.js'
-// import { timeStamp } from 'node:console'
 
 const Port = process.env.PORT ?? 3000
 const app = express()
@@ -16,6 +15,7 @@ const io = new Server(server)
 app.use(logger('dev'))
 app.use(express.json())
 
+// --- Authentication Endpoints ---
 app.post('/api/register', async (req, res) => {
     const { username, password } = req.body
 
@@ -31,9 +31,10 @@ app.post('/api/register', async (req, res) => {
         )
         res.status(201).json({message: 'User registered successfully'})
     } catch (err) {
-        if (err.code == 'ER_DUP_ENTRY') {
+        if (err.code === 'ER_DUP_ENTRY') { // Use strict equality
             return res.status(409).json({error: 'Username already exists'})
         } else {
+            console.error('Registration error:', err);
             return res.status(500).json({error: 'Internal server error'})
         }
     }
@@ -48,7 +49,7 @@ app.post('/api/login', async (req, res) => {
 
     try {
         const [users] = await db.execute(
-            'SELECT * FROM users WHERE username = ?',
+            'SELECT id, username, password FROM users WHERE username = ?',
             [username]
         );
         const user = users[0];
@@ -57,7 +58,8 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid username or password' });
         }
 
-        res.status(200).json({ username });
+        // --- CORRECTED: Ensure 'id' is sent as 'userId' for consistency with socket.handshake.auth ---
+        res.status(200).json({ username: user.username, userId: user.id });
     } catch (err) {
         console.error('Login error:', err);
         return res.status(500).json({ error: 'Internal server error' });
@@ -73,14 +75,17 @@ let db
 
 async function startServer() {
     try {
+        // --- MongoDB Connection ---
         try {
             await mongoose.connect('mongodb://localhost:27017/chat_app_mongo');
-                console.log('✅ Connected to MongoDB');
-            } catch (err) {
-                console.error('❌ MongoDB connection failed:', err);
-            }
-
-            try {
+            console.log('✅ Connected to MongoDB');
+        } catch (err) {
+            console.error('❌ MongoDB connection failed:', err);
+            // Critical for messages, so exit
+            process.exit(1);
+        }
+        // --- MySQL Connection ---
+        try {
             db = await mysql.createConnection({
                 host: 'localhost',
                 user: 'root',
@@ -89,101 +94,151 @@ async function startServer() {
                 connectTimeout: 20000
             });
             console.log('✅ Connected to MySQL');
-            } catch (err) {
-                console.error('❌ MySQL connection failed:', err);
-            }
+        } catch (err) {
+            console.error('❌ MySQL connection failed:', err);
+            // Critical for users and rooms, so exit
+            process.exit(1);
+        }
 
-        const rooms = new Set()
-
+        // --- Socket.IO Connection Logic ---
         io.on('connection', async (socket) => {
             console.log('A user has connected')
 
-            const joinedRooms = new Set()
+            const { username, userId } = socket.handshake.auth;
 
-            socket.on('join room', async (room) => {
-                socket.join(room);
-                joinedRooms.add(room);
-                rooms.add(room);
-                console.log(`${socket.id} joined room: ${room}`);
+            if (!username || !userId) {
+                console.error('Unauthenticated socket attempted to connect or userId/username is missing. Disconnecting.');
+                socket.disconnect(true);
+                return;
+            }
 
-                socket.emit('joined room', Array.from(joinedRooms));
+            socket.username = username;
+            socket.userId = userId;
+            console.log(`User connected: ${username} (ID: ${userId})`);
 
-            
+            try {
+                const [rows] = await db.execute(
+                    'SELECT room_name FROM user_rooms WHERE user_id = ?',
+                    [socket.userId]
+                );
+                const joinedRoomsFromDB = rows.map(row => row.room_name);
+                console.log(`User ${socket.username} (ID: ${socket.userId}) rejoined rooms:`, joinedRoomsFromDB);
+
+                joinedRoomsFromDB.forEach(room => {
+                    socket.join(room);
+                });
+
+                socket.emit('joined rooms', joinedRoomsFromDB);
+            } catch (err) {
+                console.error('Error fetching joined rooms from MySQL on connect:', err);
+                socket.emit('error', 'Failed to retrieve your joined rooms on connect');
+            }
+
+            // --- 'join room' handler ---
+            socket.on('join room', async (roomName) => {
+                if (!roomName) {
+                    console.error('Attempted to join an empty room name.');
+                    return;
+                }
                 try {
-                    // const [rows] = await db.execute(
-                    //     'SELECT username, content, timestamp FROM messages WHERE room = ? ORDER BY timestamp DESC LIMIT 50',
-                    //     [room]
-                    // );
-                    const recentMessages = await Message.find({ room }).sort({ timestamp: -1 }).limit(50);
-                    socket.emit('chat history', recentMessages.reverse());
+                    await db.execute(
+                        'INSERT INTO user_rooms (user_id, room_name) VALUES (?, ?) ON DUPLICATE KEY UPDATE room_name = room_name',
+                        [socket.userId, roomName]
+                    );
+                    socket.join(roomName);
+                    console.log(`${socket.username} (ID: ${socket.userId}) joined room: ${roomName}`);
+                    
+                    const [updatedRows] = await db.execute(
+                        'SELECT room_name FROM user_rooms WHERE user_id = ?',
+                        [socket.userId]
+                    );
+                    const updatedJoinedRooms = updatedRows.map(row => row.room_name);
+                    socket.emit('joined rooms', updatedJoinedRooms);
+
+                    // Fetch and send chat history (oldest first for display)
+                    const recentMessages = await Message.find({ room: roomName }).sort({ timestamp: 1 }).limit(50); // Already oldest first
+                    const historyToSend = recentMessages.map(msg => ({
+                        username: msg.username,
+                        content: msg.content,
+                        room: msg.room,
+                        timestamp: msg.timestamp ? msg.timestamp.toISOString() : undefined // Ensure timestamp is ISO string
+                    }));
+                    socket.emit('chat history', historyToSend);
                 } catch (err) {
-                    console.error('Error fetching messages:', err);
+                    console.error(`Error joining room ${roomName} for ${socket.username} (MySQL/Socket.IO):`, err);
+                    socket.emit('error', 'Failed to join room.');
                 }
             });
             
+            // --- 'leave room' handler ---
+            socket.on('leave room', async (roomName) => {
+                if (!roomName) {
+                    console.error('Attempted to leave an empty room name.');
+                    return;
+                }
+                try {
+                    await db.execute(
+                        'DELETE FROM user_rooms WHERE user_id = ? AND room_name = ?',
+                        [socket.userId, roomName]
+                    );
+
+                    socket.leave(roomName);
+                    console.log(`${socket.username} (ID: ${socket.userId}) left room: ${roomName}`);
+
+                    const [updatedRows] = await db.execute('SELECT room_name FROM user_rooms WHERE user_id = ?', [socket.userId]);
+                    const updatedJoinedRooms = updatedRows.map(row => row.room_name);
+                    socket.emit('joined rooms', updatedJoinedRooms); 
+
+                } catch (err) {
+                    console.error(`Error leaving room ${roomName} for ${socket.username} (MySQL):`, err);
+                    socket.emit('error', 'Failed to leave room.');
+                }
+            });
 
             socket.on('disconnect', () => {
-                console.log('A user has disconnected')
+                console.log(`User ${socket.username} (ID: ${socket.userId}) disconnected.`)
             })
 
+            // --- 'chat message' handler ---
             socket.on('chat message', async (msg) => {
                 const { username, content, room } = msg;
             
-                // Debug print values
-                console.log('Received chat message:', { username, content, room });
-            
                 if (!username || !content || !room) {
-                    console.error('Message or username or room is missing');
+                    console.error('Message, username or room is missing', {username, content, room});
                     return;
                 }
             
                 try {
                     const mongoMsg = new Message({username, content, room})
                     await mongoMsg.save()
-                    // const [result] = await db.execute(
-                    //     'INSERT INTO messages (username, content, room) VALUES (?, ?, ?)',
-                    //     [username, content, room]
-                    // );
-                    // const insertedId = result.insertId;
-                    io.to(room).emit('chat message', { username, content, room, timeStamp: mongoMsg.timestamp });
+                    const messageToSend = {
+                        username: mongoMsg.username,
+                        content: mongoMsg.content,
+                        room: mongoMsg.room,
+                        timestamp: mongoMsg.timestamp.toISOString() // Ensure timestamp is ISO string
+                    }
+                    io.to(room).emit('chat message', messageToSend);
                 } catch (err) {
-                    console.error('Error inserting message:', err);
+                    console.error('Error inserting message into MongoDB:', err);
                 }
             });
             
-
+            // --- 'get rooms' handler ---
             socket.on('get rooms', async () => {
-                socket.emit('room list', Array.from(rooms));
-                socket.emit('joined room', Array.from(joinedRooms));
+
                 try {
-                    const [rows] = await db.execute('SELECT DISTINCT room FROM messages');
-                    const roomsNames = rows.map(row => row.room);
-                    socket.emit('rooms list', roomsNames);
-                } catch (err) {
-                    console.error('Error fetching rooms:', err);
+                    const [rows] = await db.execute(
+                        'SELECT room_name FROM user_rooms WHERE user_id = ?', 
+                        [socket.userId]
+                    );
+                    const joinedRoomsFromDB = rows.map(row => row.room_name);
+                    console.log(`User ${socket.username} (ID: ${socket.userId}) explicitly requested rooms. Sending: `, joinedRoomsFromDB);
+                    socket.emit('joined rooms', joinedRoomsFromDB);
+                } catch (err) { 
+                    console.error('Error fetching joined rooms from MySQL (explicit request):', err);
+                    socket.emit('error', 'Failed to retrieve your joined rooms.');
                 }
             });
-
-            // Handle message recovery from the server
-            if (!socket.recovered) {
-                try {
-                    const serverOffset = socket.handshake.auth.serverOffset ?? 0
-                    const [rows] = await db.execute(
-                        'SELECT id, username, content FROM messages WHERE id > ? ORDER BY id ASC',
-                        [serverOffset]
-                    )
-
-                    rows.forEach(row => {
-                        socket.emit('chat message', {
-                            username: row.username,
-                            content: row.content,
-                            id: row.id
-                        })
-                    })
-                } catch (err) {
-                    console.error('Error fetching messages:', err)
-                }
-            }
 
         })
 

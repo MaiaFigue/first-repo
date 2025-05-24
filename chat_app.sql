@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS user_rooms(
 --     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 -- );
 
+DROP TABLE IF EXISTS messages;
+
 SHOW TABLES;
+
+DESCRIBE user_rooms;
 
 -- DESCRIBE users.username;
 
