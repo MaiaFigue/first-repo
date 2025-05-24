@@ -46,6 +46,13 @@
         #joined-rooms-list { list-style-type: none; padding: 0; margin: 0; }
         #joined-rooms-list li { padding: 5px 0; color: #333; font-weight: bold; }
         #joined-rooms-list li:hover { background-color: #ddd; cursor: pointer; } /* Optional: highlight on hover */
+        .system-message {
+            font-style: italic;
+            color: gray;
+            text-align: center;
+            /* margin: 5px 0; */
+            /* align-items: center; */
+        }
         
         /* User/Login Form */
         #login-overlay {
@@ -166,37 +173,45 @@
             return color;
         }
 
-        // NEW: Function to add a message to the display with dynamic styling
         function addMessageToDisplay(msg) {
-            console.log("Received msg.timestamp:", msg.timestamp, "Type:", typeof msg.timestamp);
-            const color = stringToColor(msg.username);
-            const isSelf = msg.username === username; // Compare message sender with current logged-in user
+            if (!msg || !msg.username || !msg.content || !msg.timestamp) {
+                console.error("Invalid message object received for display:", msg);
+                return;
+            }
 
+            const item = document.createElement('li');
             let displayTime = '';
             try {
                 const dateObj = new Date(msg.timestamp);
-                if (!isNaN(dateObj.getTime())) { // Check if the date is valid
+                if (!isNaN(dateObj.getTime())) {
                     displayTime = dateObj.toLocaleTimeString();
                 } else {
-                    displayTime = 'Invalid Date (check server timestamp)';
-                    console.error("Invalid Date object created for timestamp:", msg.timestamp); // Log error
+                    displayTime = 'Invalid Date';
+                    console.error("Invalid Date object created for timestamp:", msg.timestamp);
                 }
             } catch (e) {
                 displayTime = 'Error processing date';
-                console.error("Error processing date:", msg.timestamp, e); // Log parsing errors
+                console.error("Error processing date:", msg.timestamp, e);
             }
 
-            // Construct the HTML string for the message item using a template literal
-            const messageHtml = `
-                <li class="${isSelf ? "self" : "other"}">
+            if (msg.type === 'system') {
+                item.classList.add('system-message');
+                item.textContent = `${displayTime} - ${msg.username} ${msg.content}`; // System message content
+            } else { // Assume 'user' type if not specified or 'user'
+                const color = stringToColor(msg.username);
+                const isSelf = msg.username === username; // Compare message sender with current logged-in user
+
+                item.classList.add(isSelf ? "self" : "other");
+                
+                // Construct the HTML string for the message item using a template literal
+                item.innerHTML = `
                     ${!isSelf ? `<strong style="color:${color}">${msg.username}:</strong> ` : ''}
                     <span>${msg.content}</span>
-                    <small class="timestamp">(${new Date(msg.timestamp).toLocaleTimeString()})</small>
-                </li>
-            `;
+                    <small class="timestamp">(${displayTime})</small>
+                `;
+            }
 
-            // Insert the HTML string directly into the messages list
-            messages.insertAdjacentHTML("beforeend", messageHtml);
+            messages.insertAdjacentElement("beforeend", item); // Use insertAdjacentElement for actual element
             messages.scrollTop = messages.scrollHeight; // Scroll to bottom
         }
 
@@ -254,14 +269,23 @@
                 console.log('Disconnected from Socket.IO');
             });
 
-            // Modified to use addMessageToDisplay function
             socket.on('chat message', (msg) => {
                 addMessageToDisplay(msg);
             });
 
-            // Modified to use addMessageToDisplay function
+            socket.on('system message', (data) => {
+                console.log('Received live system message:', data);
+                addMessageToDisplay({
+                    username: data.username,
+                    content: data.content, 
+                    room: data.room,
+                    timestamp: data.timestamp,
+                    type: 'system' 
+                });
+            })
+
             socket.on('chat history', (history) => {
-                messages.innerHTML = ''; // Clear current messages
+                messages.innerHTML = ''; 
                 history.forEach(msg => {
                     addMessageToDisplay(msg);
                 });
@@ -269,8 +293,25 @@
             });
 
             socket.on('joined rooms', (rooms) => {
-                updateJoinedRoomsList(rooms);
                 console.log('Received joined rooms:', rooms);
+                updateJoinedRoomsList(rooms);
+
+                if (rooms.length > 0) {
+                    let roomToJoin = currentRoom;
+                    if (!roomToJoin || !rooms.includes(roomToJoin)) {
+                        roomToJoin = rooms[0];
+                    }
+                    if (currentRoom !== roomToJoin || messages.innerHTML === '') { 
+                        console.log(`Automatically joining room: ${roomToJoin} after reconnect.`);
+                        socket.emit('join room', roomToJoin);
+                        currentRoom = roomToJoin;
+                        roomInput.value = roomToJoin; 
+                    }
+                } else {
+                    messages.innerHTML = '';
+                    currentRoom = ''; 
+                    roomInput.value = '';
+                }
             });
 
             socket.on('room list', (allRooms) => {
@@ -278,15 +319,63 @@
             });
         }
 
+        function displaySystemMessage(data) {
+            const messages = document.getElementById('messages');
+            const item = document.createElement('li');
+            item.classList.add('system-message'); // Add a class for styling
+
+            let messageText = '';
+            // const timestamp = new Date(data.timestamp).toLocaleTimeString(); // Format system message timestamp
+
+            if (data.type === 'join') {
+                messageText = `${data.username} has joined the room.`;
+            } else if (data.type === 'leave') {
+                messageText = `${data.username} has left the room.`;
+            } else {
+                messageText = `[UNKNOWN SYSTEM MESSAGE] ${JSON.stringify(data)}`;
+            }
+
+            item.textContent = `${messageText}`;
+            messages.appendChild(item);
+            messages.scrollTop = messages.scrollHeight; // Scroll to bottom
+    }
+
         // --- Room Management Logic ---
         joinRoomBtn.addEventListener('click', () => {
-            const roomName = roomInput.value.trim();
-            if (roomName && socket) {
-                socket.emit('join room', roomName);
-                currentRoom = roomName;
-                messages.innerHTML = '';
-                console.log(`Attempting to join room: ${roomName}`);
+            const roomName = roomInput.value.trim(); 
+        
+            if (!roomName) { // Check if roomName is empty
+                alert('Please enter a room name to join!');
+                return;
             }
+
+            if (!socket) { // Check if socket is connected
+                alert('Not connected to chat. Please log in first.');
+                return;
+            }
+
+            if (currentRoom !== roomName) { 
+                socket.emit('join room', roomName); 
+                currentRoom = roomName; 
+                roomInput.value = roomName;
+                console.log(`Attempting to join room: ${roomName}`);
+
+                document.querySelectorAll('#joined-rooms-list li').forEach(item => {
+                 item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
+                });
+            } else {
+                console.log(`Already in room: ${roomName}`);
+                alert(`You are already in room: ${roomName}`);
+
+                roomInput.value = roomName; 
+                document.querySelectorAll('#joined-rooms-list li').forEach(item => {
+                    item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
+                });
+            }
+
+            document.querySelectorAll('#joined-rooms-list li').forEach(item => {
+                item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
+            });
         });
 
         leaveRoomBtn.addEventListener('click', () => {
@@ -330,13 +419,20 @@
                 const li = document.createElement('li');
                 li.textContent = room;
                 li.dataset.roomName = room;
+                li.classList.toggle('active-room', room === currentRoom); // Highlight active room
                 li.addEventListener('click', () => {
                     if (currentRoom !== room) {
-                        socket.emit('join room', room);
+                        socket.emit('join room', room); 
                         currentRoom = room;
                         roomInput.value = room;
-                        messages.innerHTML = '';
                         console.log(`Switched to room: ${room}`);
+                        document.querySelectorAll('#joined-rooms-list li').forEach(item => {
+                            item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
+                        });
+                    } else {
+                        document.querySelectorAll('#joined-rooms-list li').forEach(item => {
+                            item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
+                        });
                     }
                 });
                 joinedRoomsList.appendChild(li);

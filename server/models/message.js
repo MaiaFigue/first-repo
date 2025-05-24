@@ -7,7 +7,10 @@ const messageSchema = new mongoose.Schema({
   timestamp: {
     type: Date,
     default: Date.now
-  }
+  },
+  type: { 
+    type: String,
+    default: 'user' }
 })
 
 export const Message = mongoose.model('Message', messageSchema)

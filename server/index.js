@@ -6,6 +6,7 @@ import mysql from 'mysql2/promise'
 import bcrypt from 'bcrypt'
 import mongoose from 'mongoose'
 import { Message } from './models/message.js'
+import { timeStamp } from 'node:console'
 
 const Port = process.env.PORT ?? 3000
 const app = express()
@@ -126,6 +127,12 @@ async function startServer() {
 
                 joinedRoomsFromDB.forEach(room => {
                     socket.join(room);
+                    socket.broadcast.to(room).emit('system message',{
+                        type: 'join',
+                        username: socket.username,
+                        room: room,
+                        timeStamp: new Date().toISOString()
+                    });
                 });
 
                 socket.emit('joined rooms', joinedRoomsFromDB);
@@ -142,30 +149,46 @@ async function startServer() {
                 }
                 try {
                     await db.execute(
-                        'INSERT INTO user_rooms (user_id, room_name) VALUES (?, ?) ON DUPLICATE KEY UPDATE room_name = room_name',
+                        'INSERT IGNORE INTO user_rooms (user_id, room_name) VALUES (?, ?)',
                         [socket.userId, roomName]
                     );
                     socket.join(roomName);
                     console.log(`${socket.username} (ID: ${socket.userId}) joined room: ${roomName}`);
-                    
-                    const [updatedRows] = await db.execute(
-                        'SELECT room_name FROM user_rooms WHERE user_id = ?',
-                        [socket.userId]
-                    );
-                    const updatedJoinedRooms = updatedRows.map(row => row.room_name);
-                    socket.emit('joined rooms', updatedJoinedRooms);
 
-                    // Fetch and send chat history (oldest first for display)
-                    const recentMessages = await Message.find({ room: roomName }).sort({ timestamp: 1 }).limit(50); // Already oldest first
+                    const systemJoinMessage = new Message({
+                        username: socket.username,
+                        content: 'has joined the room', 
+                        room: roomName,
+                        type: 'system', 
+                        timestamp: new Date().toISOString()
+                    });
+                    await systemJoinMessage.save();
+
+                    // --- Broadcast system 'join' message to others in the room ---
+                    socket.broadcast.to(roomName).emit('system message', {
+                        username: systemJoinMessage.username,
+                        content: systemJoinMessage.content,
+                        room: systemJoinMessage.room,
+                        timestamp: systemJoinMessage.timestamp.toISOString(),
+                        type: systemJoinMessage.type
+                    });
+
+                    const recentMessages = await Message.find({ room: roomName }).sort({ timestamp: 1 }).limit(50);
                     const historyToSend = recentMessages.map(msg => ({
                         username: msg.username,
                         content: msg.content,
                         room: msg.room,
-                        timestamp: msg.timestamp ? msg.timestamp.toISOString() : undefined // Ensure timestamp is ISO string
+                        timestamp: msg.timestamp ? msg.timestamp.toISOString() : undefined,
+                        type: msg.type 
                     }));
                     socket.emit('chat history', historyToSend);
+
+                    const [updatedRows] = await db.execute('SELECT room_name FROM user_rooms WHERE user_id = ?', [socket.userId]);
+                    const updatedJoinedRooms = updatedRows.map(row => row.room_name);
+                    socket.emit('joined rooms', updatedJoinedRooms);
+
                 } catch (err) {
-                    console.error(`Error joining room ${roomName} for ${socket.username} (MySQL/Socket.IO):`, err);
+                    console.error(`Error joining room ${roomName} for ${socket.username} (MySQL/Mongo):`, err);
                     socket.emit('error', 'Failed to join room.');
                 }
             });
@@ -185,6 +208,24 @@ async function startServer() {
                     socket.leave(roomName);
                     console.log(`${socket.username} (ID: ${socket.userId}) left room: ${roomName}`);
 
+                    const systemLeaveMessage = new Message({
+                        username: socket.username,
+                        content: 'has left the room', 
+                        room: roomName,
+                        type: 'system', 
+                        timestamp: new Date().toISOString()
+                    });
+                    await systemLeaveMessage.save();
+
+                    // --- Broadcast system 'leave' message to others in the room ---
+                    socket.broadcast.to(roomName).emit('system message',{
+                        username: systemLeaveMessage.username,
+                        content: systemLeaveMessage.content, 
+                        room: roomName,
+                        timestamp: systemLeaveMessage.timestamp.toISOString(),
+                        type: systemJoinMessage.type
+                    });
+
                     const [updatedRows] = await db.execute('SELECT room_name FROM user_rooms WHERE user_id = ?', [socket.userId]);
                     const updatedJoinedRooms = updatedRows.map(row => row.room_name);
                     socket.emit('joined rooms', updatedJoinedRooms); 
@@ -196,7 +237,18 @@ async function startServer() {
             });
 
             socket.on('disconnect', () => {
-                console.log(`User ${socket.username} (ID: ${socket.userId}) disconnected.`)
+                console.log(`User ${socket.username} (ID: ${socket.userId}) is disconnecting.`)
+
+                for (const room of socket.rooms) {
+                    if (room !== socket.id) {
+                        socket.broadcast.to(room).emit('system message',{
+                            type: 'leave',
+                            username: socket.username,
+                            room: room,
+                            timeStamp: new Date().toISOString()
+                        });
+                    }
+                }
             })
 
             // --- 'chat message' handler ---
