@@ -419,6 +419,10 @@
                 return;
             }
 
+            console.log(`DEBUG: currentRoom is "${currentRoom}"`); // ADD THIS
+            console.log(`DEBUG: roomName is "${roomName}"`);     // ADD THIS
+            console.log(`DEBUG: currentRoom !== roomName is ${currentRoom !== roomName}`); // ADD THIS
+
             if (currentRoom !== roomName) { 
                 socket.emit('join room', roomName); 
                 currentRoom = roomName; 
@@ -567,9 +571,9 @@
                 const li = document.createElement('li');
                 li.textContent = 'No rooms joined yet.';
                 joinedRoomsList.appendChild(li);
-                currentRoom = ''; // <--- Ensures client-side state is clear
-                roomInput.value = ''; // <--- Clears input field
-                messages.innerHTML = ''; // <--- Clears chat messages
+                currentRoom = ''; 
+                roomInput.value = ''; 
+                messages.innerHTML = ''; 
                 // Also, ensure no room is marked active
                 document.querySelectorAll('#joined-rooms-list li.active-room').forEach(item => { 
                     item.classList.remove('active-room');

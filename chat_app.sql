@@ -15,21 +15,9 @@ CREATE TABLE IF NOT EXISTS user_rooms(
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- CREATE TABLE IF NOT EXISTS messages(
--- 	id INT AUTO_INCREMENT PRIMARY KEY,
---     username VARCHAR(255) NOT NULL,
---     content TEXT NOT NULL,
---     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
--- );
 
 DROP TABLE IF EXISTS messages;
 
 SHOW TABLES;
 
 DESCRIBE user_rooms;
-
--- DESCRIBE users.username;
-
--- ALTER TABLE messages ADD COLUMN room VARCHAR(255);
-
--- DESCRIBE messages;

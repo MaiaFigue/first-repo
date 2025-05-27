@@ -25,11 +25,15 @@ app.post('/api/register', async (req, res) => {
 
     try {
         const hashedPassword = await bcrypt.hash(password, 10)
-        await db.execute(
+        const [result] = await db.execute( 
             'INSERT INTO users (username, password) VALUES (?, ?)',
             [username, hashedPassword]
         )
-        res.status(201).json({message: 'User registered successfully'})
+        // The result object for INSERT queries often has an 'insertId' property
+        const newUserId = result.insertId; 
+        
+        // Return the username and the newly generated userId
+        res.status(201).json({message: 'User registered successfully', username: username, userId: newUserId}) 
     } catch (err) {
         if (err.code === 'ER_DUP_ENTRY') {
             return res.status(409).json({error: 'Username already exists'})
