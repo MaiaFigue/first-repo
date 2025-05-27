@@ -12,6 +12,13 @@
         #messages > li { padding: 10px 12px; margin-bottom: 8px; border-radius: 18px; max-width: 70%; word-wrap: break-word; border: 1px solid rgba(0, 0, 0, 0.1); box-shadow: 0 1px 0.5px rgba(0, 0, 0, 0.13); line-height: 1.4; }
         #messages > li.self { background-color: #dcf8c6; align-self: flex-end; margin-left: auto; border-color: #c4e8b3; text-align: right; }
         #messages > li.other { background-color: #ffffff; align-self: flex-start; margin-right: auto; border-color: #e0e0e0; text-align: left; }
+        
+        #messages > li.offline-pending { 
+            background-color: #fff9e6; /* Light yellow background */
+            border-color: #ffe6b3; /* Slightly darker border */
+            color: #666; /* Gray text to indicate pending */
+            font-style: italic;
+        }
 
         #messages > li.other strong {
             display: block; 
@@ -20,7 +27,6 @@
         }
 
         #messages > li .timestamp {
-            /* display: block;  */
             font-size: 0.75em;
             color: #777;
             margin-top: 5px; 
@@ -50,8 +56,10 @@
             font-style: italic;
             color: gray;
             text-align: center;
-            /* margin: 5px 0; */
-            /* align-items: center; */
+        }
+        .active-room { 
+            background-color: #cceeff; /* Highlight active room */
+            border-left: 5px solid #007bff;
         }
         
         /* User/Login Form */
@@ -159,7 +167,49 @@
         let username = ''; // Store username (current logged-in user)
         let userId = null; // Store userId for socket auth
 
-        // NEW: stringToColor function for consistent user colors
+        const OFFLINE_MESSAGES_KEY = 'offline_messages'; // Key for localStorage
+        let offlineMessageQueue = []; 
+
+        function loadOfflineMessages() {
+            try {
+                const storedMessages = localStorage.getItem(OFFLINE_MESSAGES_KEY);
+                if (storedMessages) {
+                    offlineMessageQueue = JSON.parse(storedMessages);
+                    console.log('Loaded offline messages from localStorage:', offlineMessageQueue.length);
+                }
+            } catch (error) {
+                console.error('Error loading offline messages from localStorage:', error);
+                offlineMessageQueue = []; // Reset queue on error
+            }
+        }
+
+        function saveOfflineMessages() {
+            try {
+                localStorage.setItem(OFFLINE_MESSAGES_KEY, JSON.stringify(offlineMessageQueue));
+            } catch (error) {
+                console.error('Error saving offline messages to localStorage:', error);
+            }
+        }
+
+        function processOfflineQueue() {
+            if (socket && socket.connected && offlineMessageQueue.length > 0) {
+                console.log(`Processing ${offlineMessageQueue.length} offline messages...`);
+                const messagesToSend = [...offlineMessageQueue]; // Copy the queue to avoid modifying while iterating
+                offlineMessageQueue = []; // Clear the queue after copying
+                saveOfflineMessages(); // Save empty queue immediately
+
+                messagesToSend.forEach(msg => {
+                    socket.emit('chat message', {
+                        username: msg.username,
+                        content: msg.content,
+                        room: msg.room, 
+                        timestamp: msg.timestamp, 
+                        tempId: msg.tempId 
+                    });
+                });
+            }
+        }
+
         function stringToColor(str) {
             let hash = 0;
             for (let i = 0; i < str.length; i++) {
@@ -173,7 +223,7 @@
             return color;
         }
 
-        function addMessageToDisplay(msg) {
+        function addMessageToDisplay(msg, isPendingOffline = false) {
             if (!msg || !msg.username || !msg.content || !msg.timestamp) {
                 console.error("Invalid message object received for display:", msg);
                 return;
@@ -184,7 +234,7 @@
             try {
                 const dateObj = new Date(msg.timestamp);
                 if (!isNaN(dateObj.getTime())) {
-                    displayTime = dateObj.toLocaleTimeString();
+                    displayTime = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 } else {
                     displayTime = 'Invalid Date';
                     console.error("Invalid Date object created for timestamp:", msg.timestamp);
@@ -193,17 +243,19 @@
                 displayTime = 'Error processing date';
                 console.error("Error processing date:", msg.timestamp, e);
             }
-
             if (msg.type === 'system') {
                 item.classList.add('system-message');
-                item.textContent = `${displayTime} - ${msg.username} ${msg.content}`; // System message content
-            } else { // Assume 'user' type if not specified or 'user'
+                item.textContent = `${msg.username} ${msg.content}`;
+            } else { 
                 const color = stringToColor(msg.username);
-                const isSelf = msg.username === username; // Compare message sender with current logged-in user
+                const isSelf = msg.username === username; 
 
                 item.classList.add(isSelf ? "self" : "other");
+                if (isPendingOffline) {
+                    item.classList.add('offline-pending'); 
+                    item.dataset.tempId = msg.tempId; // Store tempId on the DOM element for later reference
+                }
                 
-                // Construct the HTML string for the message item using a template literal
                 item.innerHTML = `
                     ${!isSelf ? `<strong style="color:${color}">${msg.username}:</strong> ` : ''}
                     <span>${msg.content}</span>
@@ -211,8 +263,8 @@
                 `;
             }
 
-            messages.insertAdjacentElement("beforeend", item); // Use insertAdjacentElement for actual element
-            messages.scrollTop = messages.scrollHeight; // Scroll to bottom
+            messages.insertAdjacentElement("beforeend", item); 
+            messages.scrollTop = messages.scrollHeight; 
         }
 
         // --- Login/Registration Logic ---
@@ -236,12 +288,13 @@
                 const data = await response.json();
 
                 if (response.ok) {
-                    username = user; // Store current logged-in username
+                    username = user; 
                     userId = data.userId;
                     loginOverlay.style.display = 'none';
                     startSocket();
                     loginError.textContent = '';
                     console.log(`${endpoint} successful! User: ${username}, ID: ${userId}`);
+                    loadOfflineMessages(); // Load any pending messages after login
                 } else {
                     loginError.textContent = data.error || 'Authentication failed.';
                 }
@@ -263,6 +316,7 @@
             socket.on('connect', () => {
                 console.log(`Connected to Socket.IO as ${username} (ID: ${userId})`);
                 socket.emit('get rooms');
+                processOfflineQueue(); // Attempt to send queued messages on connect
             });
 
             socket.on('disconnect', () => {
@@ -270,24 +324,45 @@
             });
 
             socket.on('chat message', (msg) => {
+                if (msg.room !== currentRoom) {
+                    // Only process messages for the currently active room
+                    return;
+                }
+
+                if (msg.tempId) { // Assuming server echoes back tempId
+                    const existingMessageElement = messages.querySelector(`li[data-temp-id="${msg.tempId}"]`);
+                    if (existingMessageElement) {
+                        existingMessageElement.classList.remove('offline-pending');
+                        existingMessageElement.removeAttribute('data-temp-id'); // Clean up tempId attribute
+                        messages.scrollTop = messages.scrollHeight; // Ensure scroll to bottom
+                        console.log(`Updated pending message with tempId: ${msg.tempId}`);
+                        return; // Don't add a new message, just updated existing one
+                    }
+                }
                 addMessageToDisplay(msg);
             });
 
             socket.on('system message', (data) => {
                 console.log('Received live system message:', data);
-                addMessageToDisplay({
-                    username: data.username,
-                    content: data.content, 
-                    room: data.room,
-                    timestamp: data.timestamp,
-                    type: 'system' 
-                });
+                if (data.room === currentRoom) {
+                    addMessageToDisplay({
+                        username: data.username,
+                        content: data.content, 
+                        room: data.room,
+                        timestamp: data.timestamp,
+                        type: 'system' 
+                    });
+                }
             })
 
             socket.on('chat history', (history) => {
                 messages.innerHTML = ''; 
                 history.forEach(msg => {
                     addMessageToDisplay(msg);
+                });
+                // Re-add pending offline messages on top of history if current room
+                offlineMessageQueue.filter(msg => msg.room === currentRoom).forEach(msg => {
+                    addMessageToDisplay(msg, true);
                 });
                 messages.scrollTop = messages.scrollHeight;
             });
@@ -298,19 +373,30 @@
 
                 if (rooms.length > 0) {
                     let roomToJoin = currentRoom;
+                    // If currentRoom is empty or not in the rejoined list, default to the first room
                     if (!roomToJoin || !rooms.includes(roomToJoin)) {
                         roomToJoin = rooms[0];
                     }
+                    // Only re-emit join if we are switching rooms or initially setting currentRoom
                     if (currentRoom !== roomToJoin || messages.innerHTML === '') { 
-                        console.log(`Automatically joining room: ${roomToJoin} after reconnect.`);
+                        console.log(`Automatically joining room: ${roomToJoin} after reconnect/initial join.`);
                         socket.emit('join room', roomToJoin);
                         currentRoom = roomToJoin;
                         roomInput.value = roomToJoin; 
+                        // After setting currentRoom, load its specific offline messages if any
+                        messages.innerHTML = ''; // Clear chat area
+                        offlineMessageQueue.filter(msg => msg.room === currentRoom).forEach(msg => {
+                            addMessageToDisplay(msg, true);
+                        });
                     }
-                } else {
+                } else { // No rooms joined at all
                     messages.innerHTML = '';
                     currentRoom = ''; 
                     roomInput.value = '';
+                    // Ensure no room is marked active in the UI
+                    document.querySelectorAll('#joined-rooms-list li.active-room').forEach(item => {
+                        item.classList.remove('active-room');
+                    });
                 }
             });
 
@@ -319,37 +405,16 @@
             });
         }
 
-        function displaySystemMessage(data) {
-            const messages = document.getElementById('messages');
-            const item = document.createElement('li');
-            item.classList.add('system-message'); // Add a class for styling
-
-            let messageText = '';
-            // const timestamp = new Date(data.timestamp).toLocaleTimeString(); // Format system message timestamp
-
-            if (data.type === 'join') {
-                messageText = `${data.username} has joined the room.`;
-            } else if (data.type === 'leave') {
-                messageText = `${data.username} has left the room.`;
-            } else {
-                messageText = `[UNKNOWN SYSTEM MESSAGE] ${JSON.stringify(data)}`;
-            }
-
-            item.textContent = `${messageText}`;
-            messages.appendChild(item);
-            messages.scrollTop = messages.scrollHeight; // Scroll to bottom
-    }
-
         // --- Room Management Logic ---
         joinRoomBtn.addEventListener('click', () => {
             const roomName = roomInput.value.trim(); 
         
-            if (!roomName) { // Check if roomName is empty
+            if (!roomName) { 
                 alert('Please enter a room name to join!');
                 return;
             }
 
-            if (!socket) { // Check if socket is connected
+            if (!socket) { 
                 alert('Not connected to chat. Please log in first.');
                 return;
             }
@@ -359,6 +424,11 @@
                 currentRoom = roomName; 
                 roomInput.value = roomName;
                 console.log(`Attempting to join room: ${roomName}`);
+                messages.innerHTML = ''; // Clear existing messages when switching rooms
+                // Re-add pending messages for the new room
+                offlineMessageQueue.filter(msg => msg.room === currentRoom).forEach(msg => {
+                    addMessageToDisplay(msg, true);
+                });
 
                 document.querySelectorAll('#joined-rooms-list li').forEach(item => {
                  item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
@@ -372,39 +442,123 @@
                     item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
                 });
             }
-
-            document.querySelectorAll('#joined-rooms-list li').forEach(item => {
-                item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
-            });
         });
 
         leaveRoomBtn.addEventListener('click', () => {
             const roomName = roomInput.value.trim();
             if (roomName && socket) {
                 socket.emit('leave room', roomName);
-                if (currentRoom === roomName) {
-                    currentRoom = '';
-                    messages.innerHTML = '';
+                if (currentRoom === roomName) { // If the room being left is the current active room
+                    currentRoom = ''; // Clear current room
+                    messages.innerHTML = ''; // Clear chat area
+                    roomInput.value = ''; // Clear room input field
+                    socket.emit('get rooms'); 
                 }
-                roomInput.value = '';
                 console.log(`Attempting to leave room: ${roomName}`);
+                // Clear any pending messages for the room being left
+                offlineMessageQueue = offlineMessageQueue.filter(msg => msg.room !== roomName);
+                saveOfflineMessages();
+            } else if (!roomName) { // Added a check for empty room name
+                alert('Please enter a room name to leave!');
             }
         });
 
-        // --- Chat Message Sending Logic ---
-        form.addEventListener('submit', (e) => {
-            e.preventDefault();
-            if (input.value && socket && currentRoom) {
-                socket.emit('chat message', {
-                    username: username, // This `username` is the current user's username
-                    content: input.value,
-                    room: currentRoom
-                });
-                input.value = '';
-            } else if (!currentRoom) {
-                alert('Please join a room first!');
+       // --- Chat Message Sending Logic ---
+            form.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const messageContent = input.value.trim();
+
+                if (!messageContent) return; 
+                if (!currentRoom) {
+                    alert('Please join a room first!');
+                    return;
+                }
+
+                const message = {
+                    username: username,
+                    content: messageContent,
+                    room: currentRoom,
+                    timestamp: new Date().toISOString(), 
+                    tempId: Date.now() + Math.random() 
+                };
+
+                if (socket && socket.connected) {
+                    console.log("Socket connected. Sending message directly.");
+                    socket.emit('chat message', message, (response) => { 
+                        if (response.status === 'ok') {
+                            console.log('Message sent and confirmed by server:', response.message);
+                        } else {
+                            console.error('Server error sending message:', response.message);
+                            // Handle failure, e.g., re-queue or notify user
+                        }
+                    });
+                } else {
+                    console.log("Socket disconnected. Queuing message for offline send.");
+                    offlineMessageQueue.push(message); 
+                    saveOfflineMessages(); 
+                    addMessageToDisplay(message, true); // Display immediately as a pending offline message
+                }
+                input.value = ''; 
+            });
+
+            // --- processOfflineQueue function ---
+            function processOfflineQueue() {
+                if (socket && socket.connected && offlineMessageQueue.length > 0) {
+                    console.log(`Processing ${offlineMessageQueue.length} offline messages...`);
+                    // Create a copy to iterate, but process them one by one to respect order and acknowledgments
+                    const messagesToSend = [...offlineMessageQueue]; 
+                    offlineMessageQueue = []; // Clear the queue immediately as we're attempting to send them
+                    saveOfflineMessages(); // Persist empty queue
+
+                    // Process messages one by one using a recursive function or a loop with await
+                    const sendNextMessage = async (index) => {
+                        if (index >= messagesToSend.length) {
+                            return; // All messages sent
+                        }
+
+                        const msg = messagesToSend[index];
+                        console.log(`Attempting to send queued message (tempId: ${msg.tempId}):`, msg.content);
+
+                        socket.emit('chat message', msg, (response) => {
+                            if (response.status === 'ok') {
+                                console.log('Queued message sent and confirmed by server:', response.message);
+                                // The 'chat message' listener will handle the UI update based on tempId
+                                sendNextMessage(index + 1); // Send next message in queue
+                            } else {
+                                console.error('Failed to send queued message (re-queuing):', response.message);
+                                // If sending fails, re-add to queue (e.g., at the beginning to retry)
+                                offlineMessageQueue.unshift(msg); 
+                                saveOfflineMessages();
+                            }
+                        });
+                    };
+
+                    sendNextMessage(0); // Start sending from the first queued message
+                }
             }
-        });
+
+            // --- socket.on('chat message') to update the display ---
+            socket.on('chat message', (msg) => {
+                if (msg.room !== currentRoom) {
+                    return;
+                }
+
+                if (msg.tempId && msg.username === username) { // Only check tempId for messages from *this* user
+                    const existingMessageElement = messages.querySelector(`li[data-temp-id="${msg.tempId}"]`);
+                    if (existingMessageElement) {
+                        // Update the existing message element to reflect server confirmation
+                        existingMessageElement.classList.remove('offline-pending');
+                        existingMessageElement.removeAttribute('data-temp-id'); // Remove tempId as it's now confirmed
+                        // Update the timestamp if the server's is more accurate
+                        existingMessageElement.querySelector('.timestamp').textContent = 
+                            `(${new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})`;
+                        messages.scrollTop = messages.scrollHeight; 
+                        console.log(`Updated pending message with tempId: ${msg.tempId}`);
+                        return; // Don't add a new message, just updated existing one
+                    }
+                }
+                addMessageToDisplay(msg);
+            });
 
         // Function to update the joined rooms list display
         function updateJoinedRoomsList(rooms) {
@@ -413,6 +567,13 @@
                 const li = document.createElement('li');
                 li.textContent = 'No rooms joined yet.';
                 joinedRoomsList.appendChild(li);
+                currentRoom = ''; // <--- Ensures client-side state is clear
+                roomInput.value = ''; // <--- Clears input field
+                messages.innerHTML = ''; // <--- Clears chat messages
+                // Also, ensure no room is marked active
+                document.querySelectorAll('#joined-rooms-list li.active-room').forEach(item => { 
+                    item.classList.remove('active-room');
+                });
                 return;
             }
             rooms.forEach(room => {
@@ -425,6 +586,11 @@
                         socket.emit('join room', room); 
                         currentRoom = room;
                         roomInput.value = room;
+                        messages.innerHTML = ''; // Clear messages when switching rooms
+                        // Re-add pending messages for the new room
+                        offlineMessageQueue.filter(msg => msg.room === currentRoom).forEach(msg => {
+                            addMessageToDisplay(msg, true);
+                        });
                         console.log(`Switched to room: ${room}`);
                         document.querySelectorAll('#joined-rooms-list li').forEach(item => {
                             item.classList.toggle('active-room', item.dataset.roomName === currentRoom);
@@ -438,7 +604,6 @@
                 joinedRoomsList.appendChild(li);
             });
         }
-
     </script>
 </body>
 </html>

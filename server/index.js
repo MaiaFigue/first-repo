@@ -6,7 +6,6 @@ import mysql from 'mysql2/promise'
 import bcrypt from 'bcrypt'
 import mongoose from 'mongoose'
 import { Message } from './models/message.js'
-import { timeStamp } from 'node:console'
 
 const Port = process.env.PORT ?? 3000
 const app = express()
@@ -32,7 +31,7 @@ app.post('/api/register', async (req, res) => {
         )
         res.status(201).json({message: 'User registered successfully'})
     } catch (err) {
-        if (err.code === 'ER_DUP_ENTRY') { // Use strict equality
+        if (err.code === 'ER_DUP_ENTRY') {
             return res.status(409).json({error: 'Username already exists'})
         } else {
             console.error('Registration error:', err);
@@ -59,7 +58,6 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid username or password' });
         }
 
-        // --- CORRECTED: Ensure 'id' is sent as 'userId' for consistency with socket.handshake.auth ---
         res.status(200).json({ username: user.username, userId: user.id });
     } catch (err) {
         console.error('Login error:', err);
@@ -82,7 +80,6 @@ async function startServer() {
             console.log('✅ Connected to MongoDB');
         } catch (err) {
             console.error('❌ MongoDB connection failed:', err);
-            // Critical for messages, so exit
             process.exit(1);
         }
         // --- MySQL Connection ---
@@ -97,7 +94,6 @@ async function startServer() {
             console.log('✅ Connected to MySQL');
         } catch (err) {
             console.error('❌ MySQL connection failed:', err);
-            // Critical for users and rooms, so exit
             process.exit(1);
         }
 
@@ -127,12 +123,6 @@ async function startServer() {
 
                 joinedRoomsFromDB.forEach(room => {
                     socket.join(room);
-                    socket.broadcast.to(room).emit('system message',{
-                        type: 'join',
-                        username: socket.username,
-                        room: room,
-                        timeStamp: new Date().toISOString()
-                    });
                 });
 
                 socket.emit('joined rooms', joinedRoomsFromDB);
@@ -147,6 +137,10 @@ async function startServer() {
                     console.error('Attempted to join an empty room name.');
                     return;
                 }
+
+                // Check if the user is already in the room
+                const wasAlreadyInRoom = socket.rooms.has(roomName); 
+
                 try {
                     await db.execute(
                         'INSERT IGNORE INTO user_rooms (user_id, room_name) VALUES (?, ?)',
@@ -155,23 +149,25 @@ async function startServer() {
                     socket.join(roomName);
                     console.log(`${socket.username} (ID: ${socket.userId}) joined room: ${roomName}`);
 
-                    const systemJoinMessage = new Message({
-                        username: socket.username,
-                        content: 'has joined the room', 
-                        room: roomName,
-                        type: 'system', 
-                        timestamp: new Date().toISOString()
-                    });
-                    await systemJoinMessage.save();
+                    if (!wasAlreadyInRoom) { 
+                        const systemJoinMessage = new Message({
+                            username: socket.username,
+                            content: 'has joined the room', 
+                            room: roomName,
+                            type: 'system', 
+                            timestamp: new Date().toISOString()
+                        });
+                        await systemJoinMessage.save();
 
-                    // --- Broadcast system 'join' message to others in the room ---
-                    socket.broadcast.to(roomName).emit('system message', {
-                        username: systemJoinMessage.username,
-                        content: systemJoinMessage.content,
-                        room: systemJoinMessage.room,
-                        timestamp: systemJoinMessage.timestamp.toISOString(),
-                        type: systemJoinMessage.type
-                    });
+                        // --- Broadcast system 'join' message to others in the room ---
+                        socket.broadcast.to(roomName).emit('system message', {
+                            username: systemJoinMessage.username,
+                            content: systemJoinMessage.content,
+                            room: systemJoinMessage.room,
+                            timestamp: systemJoinMessage.timestamp,
+                            type: systemJoinMessage.type
+                        });
+                    }
 
                     const recentMessages = await Message.find({ room: roomName }).sort({ timestamp: 1 }).limit(50);
                     const historyToSend = recentMessages.map(msg => ({
@@ -222,8 +218,8 @@ async function startServer() {
                         username: systemLeaveMessage.username,
                         content: systemLeaveMessage.content, 
                         room: roomName,
-                        timestamp: systemLeaveMessage.timestamp.toISOString(),
-                        type: systemJoinMessage.type
+                        timestamp: systemLeaveMessage.timestamp, // Already ISO string from mongoose
+                        type: systemLeaveMessage.type 
                     });
 
                     const [updatedRows] = await db.execute('SELECT room_name FROM user_rooms WHERE user_id = ?', [socket.userId]);
@@ -240,38 +236,58 @@ async function startServer() {
                 console.log(`User ${socket.username} (ID: ${socket.userId}) is disconnecting.`)
 
                 for (const room of socket.rooms) {
-                    if (room !== socket.id) {
-                        socket.broadcast.to(room).emit('system message',{
-                            type: 'leave',
+                    if (room !== socket.id) { // Ensure we don't send to the disconnecting socket's own ID room
+                        const systemDisconnectMessage = new Message({ 
                             username: socket.username,
+                            content: 'has disconnected', // Changed content for clarity on disconnect vs. leave
                             room: room,
-                            timeStamp: new Date().toISOString()
+                            type: 'system',
+                            timestamp: new Date().toISOString()
+                        });
+                        systemDisconnectMessage.save().catch(err => console.error("Error saving disconnect system message:", err)); // Save to DB
+
+                        socket.broadcast.to(room).emit('system message',{
+                            type: systemDisconnectMessage.type, 
+                            username: systemDisconnectMessage.username,
+                            content: systemDisconnectMessage.content,
+                            room: room,
+                            timestamp: systemDisconnectMessage.timestamp 
                         });
                     }
                 }
             })
 
             // --- 'chat message' handler ---
-            socket.on('chat message', async (msg) => {
-                const { username, content, room } = msg;
+            socket.on('chat message', async (msg, callback) => {
+                const { username, content, room, timestamp, tempId } = msg; 
             
                 if (!username || !content || !room) {
                     console.error('Message, username or room is missing', {username, content, room});
+                    if (typeof callback === 'function') {
+                        callback({status:  'error', message: 'Missing message'});
+                        
+                    }
                     return;
                 }
             
                 try {
-                    const mongoMsg = new Message({username, content, room})
+                    const serverTimestamp = new Date();
+
+                    const mongoMsg = new Message({username, content, room, timestamp: serverTimestamp});
                     await mongoMsg.save()
                     const messageToSend = {
                         username: mongoMsg.username,
                         content: mongoMsg.content,
                         room: mongoMsg.room,
-                        timestamp: mongoMsg.timestamp.toISOString() // Ensure timestamp is ISO string
+                        timestamp: mongoMsg.timestamp.toISOString(),
+                        tempId: tempId
                     }
                     io.to(room).emit('chat message', messageToSend);
                 } catch (err) {
                     console.error('Error inserting message into MongoDB:', err);
+                    if (typeof callback === 'function') {
+                        callback({status: 'error', message: 'Failed to send message'});
+                    }
                 }
             });
             
@@ -293,11 +309,9 @@ async function startServer() {
             });
 
         })
-
         server.listen(Port, () => {
             console.log(`Server is running on ${Port}`)
         })
-
     } catch (err) {
         console.error('Failed to connect to DB:', err)
         process.exit(1)
